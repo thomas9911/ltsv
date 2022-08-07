@@ -1,3 +1,44 @@
+//! [Labeled Tab-separated Values](http://ltsv.org/) parser in Rust and no-std compatible.
+//! 
+//! ```rust
+//! use ltsv::{tokenize, Pair};
+//! 
+//! let data_iterator = tokenize("mylabel:1234\tmore_data:text");
+//! 
+//! for line in data_iterator {
+//!     for possible_pair in line {
+//!         if let Ok(pair) = possible_pair {
+//!             let data = Pair::from(pair); 
+//!             // do something with the data
+//!             let label = data.label;
+//!             let field = data.field;
+//!         }
+//!     }
+//! }
+//! ```
+//! 
+//! The [`Data`] and [`Record`] structs both implement the Iterator behaviour, which allows to extract the data lazily.
+//! 
+//! # Features
+//! 
+//! ## std
+//! 
+//! If the std feature is enabled there are some extra helper functions you can use.
+//! For instance the [`parse`] function which early extracts all the data and puts it in a `Vec`
+//! 
+//! ```rust
+//! # #[cfg(feature = "std")] {
+//! use ltsv::{parse, Pair};
+//! 
+//! let out = parse("mylabel:1234\tmore_data:text");
+//! let lines = out.unwrap();
+//! 
+//! assert_eq!(Pair{label: "mylabel", field: "1234"}, lines[0][0]);
+//! # }
+//! ```
+//! 
+//! Side note: This is not unicode aware, but I followed the original grammar when implement this
+
 // grammar:
 //
 // ltsv = *(record NL) [record]
@@ -11,31 +52,12 @@
 // lbyte = %x30-39 / %x41-5A / %x61-7A / "_" / "." / "-" ;; [0-9A-Za-z_.-]
 // fbyte = %x01-08 / %x0B / %x0C / %x0E-FF
 
-lazy_static::lazy_static! {
-    static ref LBYTES: Vec<u8> = {
-        let mut data = Vec::new();
+#![no_std]
 
-        data.extend(0x30..=0x39);
-        data.extend(0x41..=0x5a);
-        data.extend(0x61..=0x7a);
-        data.push(b'_');
-        data.push(b'.');
-        data.push(b'-');
-
-        data
-    };
-
-    static ref FBYTES: Vec<u8> = {
-        let mut data = Vec::new();
-
-        data.extend(0x01..=0x08);
-        data.push(0x0b);
-        data.push(0x0c);
-        data.extend(0x0e..=0xff);
-
-        data
-    };
-}
+#[cfg(feature = "std")]
+extern crate std;
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 const TAB: char = '\t';
 const SPLITTER: char = ':';
@@ -110,13 +132,14 @@ impl<'a> Error<'a> {
 
 #[derive(Debug)]
 pub struct Data<'a> {
-    lines: std::str::Lines<'a>,
+    lines: core::str::Lines<'a>,
     pub current_line: usize,
 }
 
 impl<'a> Data<'a> {
     /// Runs the Iterator and allocates the data into a `Vec<Vec<_>>`.
     /// Short circuits on Error
+    #[cfg(feature = "std")]
     pub fn run(self) -> Result<Vec<Vec<PairToken<'a>>>, Error<'a>> {
         let mut out = Vec::new();
 
@@ -149,7 +172,7 @@ impl<'a> Iterator for Data<'a> {
 
 #[derive(Debug)]
 pub struct Record<'a> {
-    fields: std::str::Split<'a, char>,
+    fields: core::str::Split<'a, char>,
     pub current_line: usize,
     pub current_pointer: usize,
 }
@@ -226,7 +249,15 @@ impl<'a> PairToken<'a> {
     }
 
     fn validate_label(&self) -> Result<(), Error<'a>> {
-        if self.label.as_bytes().iter().all(|b| LBYTES.contains(b)) {
+        if self.label.as_bytes().iter().all(|b| match b {
+            0x30..=0x39 => true,
+            0x41..=0x5a => true,
+            0x61..=0x7a => true,
+            b'_' => true,
+            b'.' => true,
+            b'-' => true,
+            _ => false,
+        }) {
             Ok(())
         } else {
             Err(Error::invalid_label(self.label)
@@ -236,7 +267,13 @@ impl<'a> PairToken<'a> {
     }
 
     fn validate_field(&self) -> Result<(), Error<'a>> {
-        if self.field.as_bytes().iter().all(|b| FBYTES.contains(b)) {
+        if self.field.as_bytes().iter().all(|b| match b {
+            0x01..=0x08 => true,
+            0x0b => true,
+            0x0c => true,
+            0x0e..=0xff => true,
+            _ => false,
+        }) {
             Ok(())
         } else {
             Err(Error::invalid_field(self.field)
@@ -253,6 +290,17 @@ pub fn tokenize<'a>(input: &'a str) -> Data<'a> {
     }
 }
 
+pub fn validate<'a>(input: &'a str) -> Result<(), Error<'a>> {
+    for line in tokenize(input) {
+        for field in line {
+            field?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "std")]
 pub fn parse<'a>(input: &'a str) -> Result<Vec<Vec<Pair<'a>>>, Error<'a>> {
     let mut out = Vec::new();
 
@@ -264,201 +312,251 @@ pub fn parse<'a>(input: &'a str) -> Result<Vec<Vec<Pair<'a>>>, Error<'a>> {
     Ok(out)
 }
 
+#[cfg(feature = "std")]
 fn pair_from<'a>(token: Result<PairToken<'a>, Error<'a>>) -> Result<Pair<'a>, Error<'a>> {
     Ok(Pair::from(token?))
 }
 
-#[test]
-fn parse_example() {
-    let expected = Ok(vec![vec![
-        Pair {
-            label: "host",
-            field: "127.0.0.1",
-        },
-        Pair {
-            label: "ident",
-            field: "-",
-        },
-        Pair {
-            label: "user",
-            field: "frank",
-        },
-        Pair {
-            label: "time",
-            field: "[10/Oct/2000:13:55:36 -0700]",
-        },
-        Pair {
-            label: "req",
-            field: "GET /apache_pb.gif HTTP/1.0",
-        },
-        Pair {
-            label: "status",
-            field: "200",
-        },
-        Pair {
-            label: "size",
-            field: "2326",
-        },
-        Pair {
-            label: "referer",
-            field: "http://www.example.com/start.html",
-        },
-        Pair {
-            label: "ua",
-            field: "Mozilla/4.08 [en] (Win98; I ;Nav)",
-        },
-    ]]);
-    let out = parse("host:127.0.0.1\tident:-\tuser:frank\ttime:[10/Oct/2000:13:55:36 -0700]\treq:GET /apache_pb.gif HTTP/1.0\tstatus:200\tsize:2326\treferer:http://www.example.com/start.html\tua:Mozilla/4.08 [en] (Win98; I ;Nav)");
+#[cfg(all(test, feature = "std"))]
+mod std_test {
+    use super::*;
+    use std::vec;
 
-    assert_eq!(expected, out);
-}
+    #[test]
+    fn parse_example() {
+        let expected = Ok(vec![vec![
+            Pair {
+                label: "host",
+                field: "127.0.0.1",
+            },
+            Pair {
+                label: "ident",
+                field: "-",
+            },
+            Pair {
+                label: "user",
+                field: "frank",
+            },
+            Pair {
+                label: "time",
+                field: "[10/Oct/2000:13:55:36 -0700]",
+            },
+            Pair {
+                label: "req",
+                field: "GET /apache_pb.gif HTTP/1.0",
+            },
+            Pair {
+                label: "status",
+                field: "200",
+            },
+            Pair {
+                label: "size",
+                field: "2326",
+            },
+            Pair {
+                label: "referer",
+                field: "http://www.example.com/start.html",
+            },
+            Pair {
+                label: "ua",
+                field: "Mozilla/4.08 [en] (Win98; I ;Nav)",
+            },
+        ]]);
+        let out = parse("host:127.0.0.1\tident:-\tuser:frank\ttime:[10/Oct/2000:13:55:36 -0700]\treq:GET /apache_pb.gif HTTP/1.0\tstatus:200\tsize:2326\treferer:http://www.example.com/start.html\tua:Mozilla/4.08 [en] (Win98; I ;Nav)");
 
-#[test]
-fn invalid_label() {
-    let expected = Err(Error::invalid_label("!123").put_span(0, 4));
-    let out = parse("!123:testing");
-    assert_eq!(expected, out);
-    assert_eq!("!123", &"!123:testing"[0..4]);
-}
-
-#[test]
-fn invalid_field() {
-    let expected = Err(Error::invalid_field("testing\rstuff").put_span(8, 21));
-    let out = parse("mylabel:testing\rstuff");
-    assert_eq!(expected, out);
-    assert_eq!("testing\rstuff", &"mylabel:testing\rstuff"[8..21]);
-}
-
-#[test]
-fn invalid_pair() {
-    let expected = Err(Error::invalid_pair("stuff").put_span(16, 21));
-    let out = parse("mylabel:testing\tstuff");
-    assert_eq!(expected, out);
-    assert_eq!("stuff", &"mylabel:testing\tstuff"[16..21]);
-}
-
-#[test]
-fn ignore_invalid_parts() {
-    let expected = vec![
-        Pair {
-            label: "mylabel",
-            field: "testing",
-        },
-        Pair {
-            label: "more",
-            field: "data",
-        },
-    ];
-    let out =
-        tokenize("!123:testing\tmylabel:testing\ttest\tinvalidfield:testing\rstuff\tmore:data");
-
-    let mut fields = Vec::new();
-
-    for line in out {
-        for field in line {
-            if let Ok(field) = field {
-                fields.push(Pair::from(field))
-            }
-        }
+        assert_eq!(expected, out);
     }
 
-    assert_eq!(fields, expected)
-}
+    #[test]
+    fn ignore_invalid_parts() {
+        let expected = vec![
+            Pair {
+                label: "mylabel",
+                field: "testing",
+            },
+            Pair {
+                label: "more",
+                field: "data",
+            },
+        ];
+        let out =
+            tokenize("!123:testing\tmylabel:testing\ttest\tinvalidfield:testing\rstuff\tmore:data");
 
-#[test]
-fn tokenize_test() {
-    let expected = vec![
-        vec![
-            PairToken {
+        let mut fields = Vec::new();
+
+        for line in out {
+            for field in line {
+                if let Ok(field) = field {
+                    fields.push(Pair::from(field))
+                }
+            }
+        }
+
+        assert_eq!(fields, expected)
+    }
+
+    #[test]
+    fn tokenize_test() {
+        let expected = vec![
+            vec![
+                PairToken {
+                    label: "mylabel",
+                    field: "1",
+                    line: 0,
+                    start: 0,
+                    end: 9,
+                },
+                PairToken {
+                    label: "otherlabel",
+                    field: "testing",
+                    line: 0,
+                    start: 10,
+                    end: 28,
+                },
+            ],
+            vec![
+                PairToken {
+                    label: "mylabel",
+                    field: "2",
+                    line: 1,
+                    start: 0,
+                    end: 9,
+                },
+                PairToken {
+                    label: "otherlabel",
+                    field: "more_testing",
+                    line: 1,
+                    start: 10,
+                    end: 33,
+                },
+            ],
+        ];
+
+        let data = "mylabel:1\totherlabel:testing
+mylabel:2\totherlabel:more_testing
+";
+
+        let out = tokenize(data).run();
+
+        assert_eq!(Ok(expected), out);
+    }
+
+    #[test]
+    fn tokenize_multiline() {
+        let expected = vec![
+            vec![PairToken {
                 label: "mylabel",
                 field: "1",
                 line: 0,
                 start: 0,
                 end: 9,
-            },
-            PairToken {
-                label: "otherlabel",
-                field: "testing",
-                line: 0,
-                start: 10,
-                end: 28,
-            },
-        ],
-        vec![
-            PairToken {
+            }],
+            vec![PairToken {
                 label: "mylabel",
                 field: "2",
                 line: 1,
                 start: 0,
                 end: 9,
-            },
-            PairToken {
-                label: "otherlabel",
-                field: "more_testing",
-                line: 1,
-                start: 10,
-                end: 33,
-            },
-        ],
-    ];
+            }],
+            vec![PairToken {
+                label: "mylabel",
+                field: "3",
+                line: 2,
+                start: 0,
+                end: 9,
+            }],
+            vec![PairToken {
+                label: "mylabel",
+                field: "4",
+                line: 3,
+                start: 0,
+                end: 9,
+            }],
+            vec![PairToken {
+                label: "mylabel",
+                field: "5",
+                line: 4,
+                start: 0,
+                end: 9,
+            }],
+        ];
 
-    let data = "mylabel:1\totherlabel:testing
-mylabel:2\totherlabel:more_testing
-";
-
-    let out = tokenize(data).run();
-
-    assert_eq!(Ok(expected), out);
-}
-
-#[test]
-fn tokenize_multiline() {
-    let expected = vec![
-        vec![PairToken {
-            label: "mylabel",
-            field: "1",
-            line: 0,
-            start: 0,
-            end: 9,
-        }],
-        vec![PairToken {
-            label: "mylabel",
-            field: "2",
-            line: 1,
-            start: 0,
-            end: 9,
-        }],
-        vec![PairToken {
-            label: "mylabel",
-            field: "3",
-            line: 2,
-            start: 0,
-            end: 9,
-        }],
-        vec![PairToken {
-            label: "mylabel",
-            field: "4",
-            line: 3,
-            start: 0,
-            end: 9,
-        }],
-        vec![PairToken {
-            label: "mylabel",
-            field: "5",
-            line: 4,
-            start: 0,
-            end: 9,
-        }],
-    ];
-
-    let data = "mylabel:1
+        let data = "mylabel:1
 mylabel:2
 mylabel:3
 mylabel:4
 mylabel:5
 ";
 
-    let out = tokenize(data).run();
+        let out = tokenize(data).run();
 
-    assert_eq!(Ok(expected), out);
+        assert_eq!(Ok(expected), out);
+    }
+}
+
+#[cfg(test)]
+mod no_std_test {
+    use super::*;
+
+    #[test]
+    fn tokenize_test() {
+        let mut pairs: [Pair<'_>; 3] = [Pair::default(), Pair::default(), Pair::default()];
+
+        let data = "mylabel1:1\tmylabel2:testing\tmylabel3:1234";
+
+        let out = tokenize(data);
+
+        let mut counter = 0;
+
+        for line in out {
+            for pair in line {
+                if let Ok(x) = pair {
+                    pairs[counter] = Pair::from(x);
+                    counter += 1;
+                }
+            }
+        }
+
+        assert_eq!(
+            pairs,
+            [
+                Pair {
+                    label: "mylabel1",
+                    field: "1"
+                },
+                Pair {
+                    label: "mylabel2",
+                    field: "testing"
+                },
+                Pair {
+                    label: "mylabel3",
+                    field: "1234"
+                },
+            ]
+        )
+    }
+
+    #[test]
+    fn invalid_label() {
+        let expected = Err(Error::invalid_label("!123").put_span(0, 4));
+        let out = validate("!123:testing");
+        assert_eq!(expected, out);
+        assert_eq!("!123", &"!123:testing"[0..4]);
+    }
+
+    #[test]
+    fn invalid_field() {
+        let expected = Err(Error::invalid_field("testing\rstuff").put_span(8, 21));
+        let out = validate("mylabel:testing\rstuff");
+        assert_eq!(expected, out);
+        assert_eq!("testing\rstuff", &"mylabel:testing\rstuff"[8..21]);
+    }
+
+    #[test]
+    fn invalid_pair() {
+        let expected = Err(Error::invalid_pair("stuff").put_span(16, 21));
+        let out = validate("mylabel:testing\tstuff");
+        assert_eq!(expected, out);
+        assert_eq!("stuff", &"mylabel:testing\tstuff"[16..21]);
+    }
 }
