@@ -37,4 +37,17 @@ let lines = out.unwrap();
 assert_eq!(Pair{label: "mylabel", field: "1234"}, lines[0][0]);
 ```
 
+## More examples
+
+print results back to ltsv:
+
+```rust
+use ltsv::Pair;
+
+let data = [Pair{label: "my_label", field: "testing"}, Pair{label: "my_label2", field: "testing"}];
+let out = data.map(|x| x.to_string()).join(&ltsv::TAB.to_string());
+
+assert_eq!("my_label:testing\tmy_label2:testing", out);
+```
+
 Side note: This is not unicode aware, but I followed the original grammar when implement this
